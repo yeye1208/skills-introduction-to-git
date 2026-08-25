@@ -1,0 +1,57 @@
+#!/bin/bash
+
+echo "Git Hook: Post Commit"
+
+# Get commit information
+COMMIT_HASH=$(git rev-parse HEAD)
+COMMIT_MESSAGE=$(git log -1 --pretty=%B)
+COMMIT_AUTHOR=$(git log -1 --pretty="%an <%ae>")
+BRANCH_NAME=$(git branch --show-current)
+REPO_NAME=$(basename "$(git rev-parse --show-toplevel)")
+MODIFIED_FILES=$(git show --pretty=format: --name-only HEAD | jq -R . | jq -s .)
+
+# Get total commit count on branch
+DEFAULT_BRANCH=$(git branch --sort=committerdate --format='%(committerdate:short) %(refname:short)' | head -n 1 | cut -d' ' -f2)
+if [ "$BRANCH_NAME" != "$DEFAULT_BRANCH" ]; then
+  BRANCH_COMMIT_COUNT=$(git rev-list --count ${DEFAULT_BRANCH}..${BRANCH_NAME})
+  BRANCH_COMMIT_MESSAGES=$(git log ${DEFAULT_BRANCH}..${BRANCH_NAME} --pretty=format:'%h%x1f%s' | jq -R -s -c 'split("\n") | map(select(length > 0)) | map(split("\u001f") | {id: .[0], message: .[1]})')
+  # echo "Total commits on branch '${BRANCH_NAME}' since '${DEFAULT_BRANCH}': ${BRANCH_COMMIT_COUNT}"
+else
+  BRANCH_COMMIT_COUNT=$(git rev-list --count HEAD)
+  BRANCH_COMMIT_MESSAGES=$(git log --pretty=format:'%h%x1f%s' | jq -R -s -c 'split("\n") | map(select(length > 0)) | map(split("\u001f") | {id: .[0], message: .[1]})')
+  # echo "Total commits on branch '${DEFAULT_BRANCH}': ${BRANCH_COMMIT_COUNT}"
+fi
+
+# Build JSON payload
+PAYLOAD=$(jq -n \
+  --arg event_type "post-commit" \
+  --arg commit_hash "$COMMIT_HASH" \
+  --arg commit_message "$COMMIT_MESSAGE" \
+  --arg commit_author "$COMMIT_AUTHOR" \
+  --arg branch_name "$BRANCH_NAME" \
+  --argjson branch_commit_count "$BRANCH_COMMIT_COUNT" \
+  --argjson branch_commit_messages "$BRANCH_COMMIT_MESSAGES" \
+  --arg repository_name "$REPO_NAME" \
+  --argjson modified_files "$MODIFIED_FILES" \
+  --arg timestamp "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+  '{
+    "event_type": $event_type,
+    "client_payload": {
+      "commit_hash": $commit_hash,
+      "commit_message": $commit_message,
+      "commit_author": $commit_author,
+      "branch_name": $branch_name,
+      "branch_commit_count": $branch_commit_count,
+      "branch_commit_messages": $branch_commit_messages,
+      "repository_name": $repository_name,
+      "modified_files": $modified_files,
+      "timestamp": $timestamp
+    }
+  }')
+
+# Send repository dispatch event
+curl -X POST \
+  -H "Accept: application/vnd.github.v3+json" \
+  -H "Authorization: token ${GITHUB_TOKEN}" \
+  "https://api.github.com/repos/${GITHUB_REPOSITORY}/dispatches" \
+  -d "$PAYLOAD" 2>/dev/null || echo "Failed to send repository dispatch event"
